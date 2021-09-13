@@ -294,7 +294,7 @@ byte startingState[3];        // how the puzzle starts
 byte colorState[3];           // the current state displayed
 byte overlayState[3];         // used for animations or to hide things
 
-#define RESET_TIMER_DELAY 3000
+#define RESET_TIMER_DELAY 1000
 Timer resetTimer;             // prevents cyclic resets
 
 uint32_t randState;
@@ -509,10 +509,13 @@ void handleUserInput()
     }
   }
 
-  // No matter what state we're in, long pressing resets the game and other connected tiles
-  if (buttonLongPressed())
+  // No matter what state we're in, triple click resets the game and other connected tiles
+  if (buttonMultiClicked())
   {
-    resetGame();
+    if (buttonClickCount() == 3)
+    {
+      resetGame();
+    }
   }
 }
 
@@ -548,6 +551,16 @@ void __attribute__((noinline)) resetGame()
   // Propagate the reset out to the cluster
   FOREACH_FACE(f)
   {
+    // Nuke all pending comm packets by resetting the insertion index
+    // This should fix things if the queue somehow gets overrun
+    commInsertionIndexes[f] = 0;
+
+    // If the tile was in the middle of sending a comm packet on this face
+    // then it has already sent the command. Thus this first reset command
+    // might get ignored because only the data will be sent. Queue two
+    // commands to be sure it gets through. There is a timer for protection
+    // so that they don't both take effect.
+    enqueueCommOnFace(f, Command_Reset, DONT_CARE);
     enqueueCommOnFace(f, Command_Reset, DONT_CARE);
   }
 }
@@ -736,6 +749,12 @@ void updateCommOnFaces()
 
 void processCommForFace(Command command, byte value, byte f)
 {
+  // Early out while we're still in reset
+  if (!resetTimer.isExpired())
+  {
+    return;
+  }
+
   //FaceStateComm *faceStateComm = &faceStatesComm[f];
 
   //byte oppositeFace = OPPOSITE_FACE(f);
@@ -745,13 +764,11 @@ void processCommForFace(Command command, byte value, byte f)
   {
     case Command_AssignRole:
       // Grab our new role
-      tileRole = (TileRole) value;
-      rootFace = f;
-      gameState = GameState_Setup;
-#if REDUNDANT_ROLE_CHECKS
-      if (tileRole == TileRole_Tool)
-#endif
+      if (tileRole != TileRole_Working)
       {
+        tileRole = (TileRole) value;
+        rootFace = f;
+        gameState = GameState_Setup;
         showAnimation(ANIM_SEQ_INDEX__TOOL_SETUP, ANIM_RATE_SLOW);
       }
       break;
@@ -849,9 +866,7 @@ void processCommForFace(Command command, byte value, byte f)
       break;
       
     case Command_ToolColor:
-#if REDUNDANT_ROLE_CHECKS
       if (tileRole == TileRole_Working)
-#endif
       {
         faceStatesGame[f].neighborTool.color = value;
         updateWorkingState();
@@ -915,7 +930,7 @@ void setupWorking()
     numToolTiles = numNeighbors;
     
     // Generate the tools and the puzzle based on them
-    if (numNeighbors > 1)
+    if (numNeighbors > 0)
     {
       generateToolsAndPuzzle();
     }
